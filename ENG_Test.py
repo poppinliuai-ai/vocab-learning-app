@@ -577,7 +577,7 @@ else:
     total = len(st.session_state.selected_words)
     current_word = st.session_state.selected_words[idx]
 
-    st.title(f"📖 第一階段：【{st.session_state.current_category}】單字背誦")
+    st.title(f"📖【{st.session_state.current_category}】單字背誦")
     st.progress((idx + 1) / total)
     st.caption(f"背誦進度：第 {idx + 1} 題 / 共 {total} 題")
 
@@ -603,7 +603,7 @@ else:
     total = len(st.session_state.quiz_questions)
     q = st.session_state.quiz_questions[idx]
 
-    st.title(f"📝 第二階段：【{st.session_state.current_category}】單字測驗")
+    st.title(f"📝【{st.session_state.current_category}】單字測驗")
     st.progress((idx + 1) / total)
     st.caption(f"測驗進度：第 {idx + 1} 題 / 共 {total} 題")
 
