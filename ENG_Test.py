@@ -1,17 +1,90 @@
 import csv
 from datetime import datetime
+import hashlib
 import io
 import json
 import os
 import random
 from gtts import gTTS
 import streamlit as st
-import streamlit.components.v1 as components
 
 SESSION_COUNT = 5
 CSV_FILE_PATH = "words.csv"
+USER_RECORDS_FILE = "user_records.json"
 
 
+# ==================== 安全性：密碼雜湊加密函數 ====================
+def hash_password(password: str) -> str:
+  """使用 SHA-256 加鹽雜湊密碼，不儲存明文密碼"""
+  salt = "vocab_app_salt_2026"
+  return hashlib.sha256((password + salt).encode("utf-8")).hexdigest()
+
+
+# ==================== 資料庫讀寫函數 ====================
+def load_all_user_records() -> dict:
+  if os.path.exists(USER_RECORDS_FILE):
+    try:
+      with open(USER_RECORDS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+    except Exception:
+      return {}
+  return {}
+
+
+def save_user_record(
+    username: str, quiz_history: list, wrong_words_db: dict, cleared_count: int
+):
+  if not username:
+    return
+  records = load_all_user_records()
+  if username in records:
+    records[username]["quiz_history"] = quiz_history
+    records[username]["wrong_words_db"] = wrong_words_db
+    records[username]["total_cleared_count"] = cleared_count
+    records[username]["last_active"] = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    try:
+      with open(USER_RECORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+      st.error(f"存檔時發生錯誤: {e}")
+
+
+def register_user(username: str, password: str, display_name: str):
+  records = load_all_user_records()
+  clean_user = username.strip().lower()
+  if clean_user in records:
+    return False, "⚠️ 該帳號已被註冊，請換一個帳號名稱！"
+
+  records[clean_user] = {
+      "display_name": display_name.strip() if display_name.strip() else username,
+      "password_hash": hash_password(password),
+      "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+      "quiz_history": [],
+      "wrong_words_db": {},
+      "total_cleared_count": 0,
+      "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+  }
+  with open(USER_RECORDS_FILE, "w", encoding="utf-8") as f:
+    json.dump(records, f, ensure_ascii=False, indent=2)
+  return True, "🎉 註冊成功！"
+
+
+def verify_user(username: str, password: str):
+  records = load_all_user_records()
+  clean_user = username.strip().lower()
+  if clean_user not in records:
+    return False, None, "❌ 帳號不存在，請先註冊！"
+
+  user_data = records[clean_user]
+  if user_data.get("password_hash") == hash_password(password):
+    return True, user_data, "登入成功！"
+  else:
+    return False, None, "❌ 密碼錯誤，請重新輸入！"
+
+
+# ==================== 單字與語音工具 ====================
 def parse_example(example_raw: str):
   if not example_raw:
     return "", ""
@@ -66,23 +139,6 @@ def get_audio_bytes(text: str) -> bytes:
   return fp.read()
 
 
-# ==================== 原生 JavaScript 瀏覽器本機儲存 (LocalStorage) ====================
-def save_browser_data(key: str, data):
-  """使用原生 JavaScript 寫入使用者的手機/電腦 LocalStorage"""
-  json_str = json.dumps(data, ensure_ascii=False)
-  safe_json = json_str.replace("\\", "\\\\").replace("'", "\\'")
-  html_script = f"""
-    <script>
-        try {{
-            window.parent.localStorage.setItem('{key}', '{safe_json}');
-        }} catch(e) {{
-            console.error('LocalStorage Write Error:', e);
-        }}
-    </script>
-    """
-  components.html(html_script, height=0, width=0)
-
-
 def init_session(category_name: str, categories_db: dict, custom_pool=None):
   category_pool = (
       custom_pool
@@ -106,7 +162,6 @@ def init_session(category_name: str, categories_db: dict, custom_pool=None):
   st.session_state.current_quiz_records = []
   st.session_state.cleared_words = []
 
-  # 干擾項選項生成
   all_defs = [w["def"] for w in category_pool if w.get("def")]
   if len(all_defs) < 4:
     global_defs = [
@@ -157,18 +212,83 @@ if not CATEGORIES_DB:
   st.error(f"⚠️ 找不到 `{CSV_FILE_PATH}` 檔案或檔案內沒有單字資料！")
   st.stop()
 
-# 初始化 session 狀態變數
-if "quiz_history" not in st.session_state:
-  st.session_state.quiz_history = []
+# 登入狀態管理
+if "authenticated" not in st.session_state:
+  st.session_state.authenticated = False
+  st.session_state.current_user = ""
+  st.session_state.display_name = ""
 
-if "wrong_words_db" not in st.session_state:
-  st.session_state.wrong_words_db = {}
 
+# ==================== 登入與註冊頁面 ====================
+if not st.session_state.authenticated:
+  st.title("🎓 英文單字學習與測驗系統")
+  st.caption("請登入您的專屬學習帳號以載入測驗進度與成就勳章。")
+
+  tab_login, tab_register = st.tabs(["🔑 帳號登入", "✨ 新增註冊帳號"])
+
+  # 1. 登入表單（使用 st.form 確保完整送出）
+  with tab_login:
+    with st.form("login_form", clear_on_submit=False):
+      st.write("#### 會員登入")
+      login_user = st.text_input("帳號 (Username)：")
+      login_pwd = st.text_input("密碼 (Password)：", type="password")
+      submit_login = st.form_submit_button("立即登入 🚀", type="primary", use_container_width=True)
+
+    if submit_login:
+      clean_u = login_user.strip()
+      clean_p = login_pwd.strip()
+      if not clean_u or not clean_p:
+        st.warning("請填寫完整的帳號與密碼！")
+      else:
+        success, u_data, msg = verify_user(clean_u, clean_p)
+        if success:
+          st.session_state.authenticated = True
+          st.session_state.current_user = clean_u.lower()
+          st.session_state.display_name = u_data.get("display_name", clean_u)
+          st.session_state.quiz_history = u_data.get("quiz_history", [])
+          st.session_state.wrong_words_db = u_data.get("wrong_words_db", {})
+          st.session_state.total_cleared_count = u_data.get("total_cleared_count", 0)
+          st.session_state.selected_nav = "📝 單字學習與測驗"
+          default_cat = list(CATEGORIES_DB.keys())[0]
+          init_session(default_cat, CATEGORIES_DB)
+          st.success("登入成功，正在為您載入學習紀錄...")
+          st.rerun()
+        else:
+          st.error(msg)
+
+  # 2. 註冊表單（使用 st.form 確保完整送出）
+  with tab_register:
+    with st.form("register_form", clear_on_submit=False):
+      st.write("#### 註冊個人專屬帳號")
+      reg_user = st.text_input("設定帳號 (英數字佳)：")
+      reg_name = st.text_input("您的姓名／暱稱 (例如: Erica, 小明)：")
+      reg_p1 = st.text_input("設定密碼：", type="password")
+      reg_p2 = st.text_input("再次確認密碼：", type="password")
+      submit_reg = st.form_submit_button("確認註冊 📝", use_container_width=True)
+
+    if submit_reg:
+      clean_reg_u = reg_user.strip()
+      clean_reg_p1 = reg_p1.strip()
+      clean_reg_p2 = reg_p2.strip()
+      clean_reg_name = reg_name.strip()
+
+      if not clean_reg_u or not clean_reg_p1 or not clean_reg_p2:
+        st.warning("帳號與兩次密碼欄位皆為必填！")
+      elif clean_reg_p1 != clean_reg_p2:
+        st.error("兩次輸入的密碼不一致，請重新檢查！")
+      else:
+        ok, res_msg = register_user(clean_reg_u, clean_reg_p1, clean_reg_name)
+        if ok:
+          st.success(res_msg + " 請點選上方「🔑 帳號登入」分頁進行登入。")
+        else:
+          st.error(res_msg)
+
+  st.stop()
+
+
+# ==================== 已登入主介面 ====================
 if "selected_nav" not in st.session_state:
   st.session_state.selected_nav = "📝 單字學習與測驗"
-
-if "total_cleared_count" not in st.session_state:
-  st.session_state.total_cleared_count = 0
 
 if "cleared_words" not in st.session_state:
   st.session_state.cleared_words = []
@@ -181,23 +301,21 @@ if "current_category" not in st.session_state or (
   init_session(default_cat, CATEGORIES_DB)
 
 
-# ==================== 輔助：計算 4 大類各 20 個成就徽章 (帶特性圖示的分頁標題) ====================
+# ==================== 輔助：計算 4 大類各 20 個成就徽章 ====================
 def calculate_categorized_badges(history, cleared_count):
   total_rounds = len(history)
   total_correct = sum(h["score"] for h in history)
 
-  # 計算歷史最大連續滿分輪數
   max_streak = 0
   cur_streak = 0
   for h in history:
-    if h["score"] == h["total"] and h["total"] > 0:
+    if h["total"] > 0 and h["score"] == h["total"]:
       cur_streak += 1
       max_streak = max(max_streak, cur_streak)
     else:
       cur_streak = 0
 
   categories = {
-      # 1. 輪數挑戰 (20 個，最高 1000 輪) - 特性圖案：🏃 奔馳長征
       "🏃 輪數長征": [
           {"name": "初試啼聲", "target": 1, "icon": "🌱", "curr": total_rounds, "unit": "輪"},
           {"name": "步入正軌", "target": 3, "icon": "🌿", "curr": total_rounds, "unit": "輪"},
@@ -220,7 +338,6 @@ def calculate_categorized_badges(history, cleared_count):
           {"name": "登峰極致", "target": 950, "icon": "🪐", "curr": total_rounds, "unit": "輪"},
           {"name": "千輪千秋", "target": 1000, "icon": "☀️", "curr": total_rounds, "unit": "輪"},
       ],
-      # 2. 滿分連勝 (20 個，最高 200 輪) - 特性圖案：🔥 連續熾熱連勝
       "🔥 滿分連勝": [
           {"name": "完美首勝", "target": 1, "icon": "💯", "curr": max_streak, "unit": "輪"},
           {"name": "雙喜臨門", "target": 2, "icon": "✌️", "curr": max_streak, "unit": "輪"},
@@ -243,7 +360,6 @@ def calculate_categorized_badges(history, cleared_count):
           {"name": "萬佛朝宗", "target": 180, "icon": "🪷", "curr": max_streak, "unit": "輪"},
           {"name": "雙百封神", "target": 200, "icon": "👑", "curr": max_streak, "unit": "輪"},
       ],
-      # 3. 弱點消除 (20 個，最高 500 個) - 特性圖案：🛡️ 防禦與弱點粉碎
       "🛡️ 弱點粉碎": [
           {"name": "破繭而出", "target": 1, "icon": "🧹", "curr": cleared_count, "unit": "個"},
           {"name": "查漏補缺", "target": 3, "icon": "🧼", "curr": cleared_count, "unit": "個"},
@@ -266,7 +382,6 @@ def calculate_categorized_badges(history, cleared_count):
           {"name": "終極淨化", "target": 480, "icon": "✨", "curr": cleared_count, "unit": "個"},
           {"name": "五百完美守護", "target": 500, "icon": "👑", "curr": cleared_count, "unit": "個"},
       ],
-      # 4. 答對總量 (20 個，最高 5000 題) - 特性圖案：👑 詞彙量宗師殿堂
       "👑 詞彙巔峰": [
           {"name": "單字起步", "target": 10, "icon": "📖", "curr": total_correct, "unit": "題"},
           {"name": "實力初顯", "target": 25, "icon": "📝", "curr": total_correct, "unit": "題"},
@@ -315,7 +430,17 @@ def calculate_categorized_badges(history, cleared_count):
 
 # ==================== 側邊欄控制 ====================
 with st.sidebar:
-  st.header("⚙️ 題庫與功能選單")
+  st.header(f"👤 {st.session_state.display_name}")
+  st.caption(f"帳號 ID：`{st.session_state.current_user}`")
+
+  if st.button("🚪 登出帳號", use_container_width=True):
+    st.session_state.authenticated = False
+    st.session_state.current_user = ""
+    st.session_state.display_name = ""
+    st.rerun()
+
+  st.write("---")
+  st.header("⚙️ 功能選單")
 
   app_view = st.radio(
       "功能切換：",
@@ -330,9 +455,8 @@ with st.sidebar:
   st.write("---")
 
   wrong_db = st.session_state.wrong_words_db
-  st.metric(label="🎯 本機弱點單字量", value=f"{len(wrong_db)} 個")
-  st.caption(f"💾 本次會話紀錄：**{len(st.session_state.quiz_history)}** 輪")
-  st.caption("🔒 模式：**獨立裝置本地儲存（不與他人共用）**")
+  st.metric(label="🎯 目前弱點單字量", value=f"{len(wrong_db)} 個")
+  st.caption(f"💾 累計測驗輪數：**{len(st.session_state.quiz_history)}** 輪")
 
   category_list = list(CATEGORIES_DB.keys())
   cur_cat = (
@@ -364,35 +488,45 @@ with st.sidebar:
     st.rerun()
 
   st.write("---")
-  if wrong_db and st.button("🧹 清空本機弱點庫", use_container_width=True):
+  if wrong_db and st.button("🧹 清空個人弱點庫", use_container_width=True):
     st.session_state.wrong_words_db = {}
-    save_browser_data("wrong_words", {})
-    st.success("已清空本裝置弱點庫！")
+    save_user_record(
+        st.session_state.current_user,
+        st.session_state.quiz_history,
+        st.session_state.wrong_words_db,
+        st.session_state.total_cleared_count,
+    )
+    st.success("已清空弱點庫！")
     st.rerun()
 
   if st.session_state.quiz_history and st.button(
-      "🗑️ 清空歷史紀錄", use_container_width=True
+      "🗑️ 重置個人所有紀錄", use_container_width=True
   ):
     st.session_state.quiz_history = []
     st.session_state.total_cleared_count = 0
-    save_browser_data("quiz_history", [])
-    st.success("已清空紀錄！")
+    save_user_record(
+        st.session_state.current_user,
+        [],
+        st.session_state.wrong_words_db,
+        0,
+    )
+    st.success("已重置歷史紀錄！")
     st.rerun()
 
 
 # ==================== 視圖 1：個人弱點加強庫 ====================
 if app_view == "🎯 個人弱點加強庫":
-  st.title("🎯 個人弱點加強庫")
+  st.title(f"🎯 【{st.session_state.display_name}】的弱點加強庫")
   wrong_db = st.session_state.wrong_words_db
 
   if not wrong_db:
-    st.success("🎉 太棒了！這台裝置上目前沒有累積任何錯題弱點！")
+    st.success("🎉 太棒了！目前沒有累積任何錯題弱點！")
   else:
     sorted_wrongs = sorted(
         wrong_db.values(), key=lambda x: x["count"], reverse=True
     )
     st.write(
-        f"本機共儲存 **{len(sorted_wrongs)}** 個曾答錯的單字（依答錯頻率排列）："
+        f"累計記錄 **{len(sorted_wrongs)}** 個曾答錯的單字（依答錯頻率排列）："
     )
 
     if len(sorted_wrongs) >= 5:
@@ -413,7 +547,7 @@ if app_view == "🎯 個人弱點加強庫":
       )
     else:
       st.caption(
-          f"💡 弱點單字需累積滿 5 個即可啟動專項測驗（目前本機累積"
+          f"💡 弱點單字需累積滿 5 個即可啟動專項測驗（目前累積"
           f" {len(sorted_wrongs)} 個）。"
       )
 
@@ -439,14 +573,19 @@ if app_view == "🎯 個人弱點加強庫":
         if st.button("已熟記移除 ✕", key=f"del_wrong_{item['word']}"):
           del st.session_state.wrong_words_db[item["word"]]
           st.session_state.total_cleared_count += 1
-          save_browser_data("wrong_words", st.session_state.wrong_words_db)
+          save_user_record(
+              st.session_state.current_user,
+              st.session_state.quiz_history,
+              st.session_state.wrong_words_db,
+              st.session_state.total_cleared_count,
+          )
           st.rerun()
       st.divider()
 
 
-# ==================== 視圖 2：學習成就與儀表板 (帶特性圖示分頁標題) ====================
+# ==================== 視圖 2：學習成就與儀表板 ====================
 elif app_view == "🏆 學習成就與儀表板":
-  st.title("🏆 學習成就與儀表板")
+  st.title(f"🏆 【{st.session_state.display_name}】學習成就與儀表板")
   st.caption("視覺化追蹤每一次進步，收集解鎖 80 枚成就勳章！")
 
   history = st.session_state.quiz_history
@@ -454,11 +593,9 @@ elif app_view == "🏆 學習成就與儀表板":
       history, st.session_state.total_cleared_count
   )
 
-  # 區塊 A：整體成就解鎖進度
   st.subheader(f"🎖️ 成就勳章總覽（已解鎖 {unlocked_cnt} / {total_cnt}）")
   st.progress(unlocked_cnt / total_cnt)
 
-  # 渲染帶有個性圖示的四大分類分頁
   tab_names = list(categorized_badges.keys())
   tabs = st.tabs(tab_names)
 
@@ -468,7 +605,6 @@ elif app_view == "🏆 學習成就與儀表板":
       cat_unlocked = sum(1 for b in badges if b["unlocked"])
       st.caption(f"📊 {cat_name} 進度：已解鎖 **{cat_unlocked} / {len(badges)}** 枚")
 
-      # 5 欄排版，20 個徽章剛好整齊排成 4 列
       b_cols = st.columns(5)
       for b_idx, b in enumerate(badges):
         col = b_cols[b_idx % 5]
@@ -487,7 +623,6 @@ elif app_view == "🏆 學習成就與儀表板":
   if not history:
     st.info("💡 尚未完成任何測驗，進行幾輪測驗後這裡將會展示您的進步走勢圖！")
   else:
-    # 區塊 B：統計 KPI 卡片
     total_rounds = len(history)
     total_questions = sum(h["total"] for h in history)
     total_score = sum(h["score"] for h in history)
@@ -501,7 +636,6 @@ elif app_view == "🏆 學習成就與儀表板":
 
     st.write("")
 
-    # 區塊 C：趨勢折線圖
     st.subheader("📈 最近測驗成績走勢 (換算滿分 100)")
     recent_history = history[-15:] if len(history) > 15 else history
     chart_scores = [
@@ -509,7 +643,6 @@ elif app_view == "🏆 學習成就與儀表板":
     ]
     st.line_chart(chart_scores)
 
-    # 區塊 D：分類掌握度長條圖
     st.subheader("📊 各領域答對率統計 (%)")
     cat_stats = {}
     for h in history:
@@ -529,16 +662,16 @@ elif app_view == "🏆 學習成就與儀表板":
 
 # ==================== 視圖 3：歷史考題回顧 ====================
 elif app_view == "📜 歷史考題回顧":
-  st.title("📜 歷史考題詳細回顧")
+  st.title(f"📜 【{st.session_state.display_name}】歷史考題回顧")
   st.caption("完整記錄歷次測驗分數、各題作答詳情與原聲發音。")
 
   history = st.session_state.quiz_history
 
   if not history:
-    st.info("本裝置尚無測驗紀錄，請先完成至少一輪單字測驗！")
+    st.info("尚無測驗紀錄，請先完成至少一輪單字測驗！")
   else:
     st.write(
-        f"本機共儲存 **{len(history)}** 次測驗紀錄（依時間由新至舊排列）："
+        f"累計記錄 **{len(history)}** 次測驗（依時間由新至舊排列）："
     )
 
     for h_idx, record in enumerate(reversed(history)):
@@ -571,13 +704,12 @@ elif app_view == "📜 歷史考題回顧":
 
 # ==================== 視圖 4：單字學習與測驗 ====================
 else:
-  # 階段 1：背誦單字
   if st.session_state.mode == "STUDY":
     idx = st.session_state.study_index
     total = len(st.session_state.selected_words)
     current_word = st.session_state.selected_words[idx]
 
-    st.title(f"📖【{st.session_state.current_category}】單字背誦")
+    st.title(f"📖 第一階段：【{st.session_state.current_category}】單字背誦")
     st.progress((idx + 1) / total)
     st.caption(f"背誦進度：第 {idx + 1} 題 / 共 {total} 題")
 
@@ -597,13 +729,12 @@ else:
         st.session_state.mode = "QUIZ"
         st.rerun()
 
-  # 階段 2：隨機測驗
   elif st.session_state.mode == "QUIZ":
     idx = st.session_state.quiz_step
     total = len(st.session_state.quiz_questions)
     q = st.session_state.quiz_questions[idx]
 
-    st.title(f"📝【{st.session_state.current_category}】單字測驗")
+    st.title(f"📝 第二階段：【{st.session_state.current_category}】單字測驗")
     st.progress((idx + 1) / total)
     st.caption(f"測驗進度：第 {idx + 1} 題 / 共 {total} 題")
 
@@ -618,14 +749,18 @@ else:
 
         if is_correct:
           st.session_state.score += 1
-          # 若在「弱點專項測驗」中答對，錯誤次數遞減，歸零直接移除
           if is_weakness_test and q["word"] in st.session_state.wrong_words_db:
             st.session_state.wrong_words_db[q["word"]]["count"] -= 1
             if st.session_state.wrong_words_db[q["word"]]["count"] <= 0:
               del st.session_state.wrong_words_db[q["word"]]
               st.session_state.cleared_words.append(q["word"])
               st.session_state.total_cleared_count += 1
-            save_browser_data("wrong_words", st.session_state.wrong_words_db)
+            save_user_record(
+                st.session_state.current_user,
+                st.session_state.quiz_history,
+                st.session_state.wrong_words_db,
+                st.session_state.total_cleared_count,
+            )
         else:
           st.session_state.wrong_answers.append({
               "word": q["word"],
@@ -645,7 +780,6 @@ else:
         if idx + 1 < total:
           st.session_state.quiz_step += 1
         else:
-          # 測驗結算：寫入本機歷史紀錄
           new_round = {
               "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
               "category": st.session_state.current_category,
@@ -654,9 +788,7 @@ else:
               "questions": st.session_state.current_quiz_records,
           }
           st.session_state.quiz_history.append(new_round)
-          save_browser_data("quiz_history", st.session_state.quiz_history)
 
-          # 寫入本機弱點庫
           if st.session_state.wrong_answers:
             for w_item in st.session_state.wrong_answers:
               w = w_item["word"]
@@ -676,12 +808,17 @@ else:
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ),
                 }
-            save_browser_data("wrong_words", st.session_state.wrong_words_db)
+
+          save_user_record(
+              st.session_state.current_user,
+              st.session_state.quiz_history,
+              st.session_state.wrong_words_db,
+              st.session_state.total_cleared_count,
+          )
 
           st.session_state.mode = "RESULT"
         st.rerun()
 
-  # 階段 3：本輪結算
   elif st.session_state.mode == "RESULT":
     total = len(st.session_state.quiz_questions)
     score = st.session_state.score
@@ -707,7 +844,7 @@ else:
     if st.session_state.wrong_answers:
       st.error(
           f"⚠️ 本輪共答錯 {len(st.session_state.wrong_answers)}"
-          " 題，已自動收錄至此裝置的「個人弱點加強庫」！"
+          " 題，已自動收錄至「個人弱點加強庫」！"
       )
       st.subheader("❌ 本輪錯題檢討")
       for item in st.session_state.wrong_answers:
@@ -732,4 +869,4 @@ else:
         init_session(cat_to_start, CATEGORIES_DB)
         st.rerun()
     with col2:
-      st.caption("💡 此紀錄已安全保存在本裝置瀏覽器中，不與其他裝置共用。")
+      st.caption(f"💡 紀錄已安全同步至【{st.session_state.display_name}】的專屬存檔中。")
